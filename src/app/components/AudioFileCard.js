@@ -9,7 +9,7 @@ export default function AudioFileCard({
   fetchFiles, 
   activePlayerId, 
   setActivePlayerId,
-  apiBaseUrl = 'http://localhost:5000'
+  apiBaseUrl = process.env.NEXT_PUBLIC_RAILWAY_URL || 'http://localhost:5000'
 }) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioProgress, setAudioProgress] = useState(0);
