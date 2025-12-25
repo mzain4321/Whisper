@@ -1,10 +1,16 @@
-
 "use client";
 
 import { useState, useRef, useEffect } from "react";
 import { toast } from "sonner";
 
-export default function AudioFileCard({ file, setModal, fetchFiles, activePlayerId, setActivePlayerId }) {
+export default function AudioFileCard({ 
+  file, 
+  setModal, 
+  fetchFiles, 
+  activePlayerId, 
+  setActivePlayerId,
+  apiBaseUrl = 'http://localhost:5000'
+}) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [audioProgress, setAudioProgress] = useState(0);
   const [volume, setVolume] = useState(80);
@@ -13,19 +19,26 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
   const [showVolumeSlider, setShowVolumeSlider] = useState(false);
   const [isSeeking, setIsSeeking] = useState(false);
   const [audioError, setAudioError] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const [audioDuration, setAudioDuration] = useState(0);
   const audioRef = useRef(null);
   const progressBarRef = useRef(null);
   const playerId = useRef(Date.now().toString());
 
+  // Remove /api from base URL for static files
+  const staticBaseUrl = apiBaseUrl.replace('/api', '');
+  
   // Check if file is actually an audio file
-  const isAudioFile = file.name.match(/\.(mp3|wav|webm|ogg|m4a|flac)$/i) !== null;
+  const isAudioFile = file.name.match(/\.(mp3|wav|webm|ogg|m4a|flac|m4b|aac|mp4)$/i) !== null;
   
   // Create URL for the audio file (only if it's an audio file)
   const audioUrl = isAudioFile 
-    ? `/api/audio-file?fileName=${encodeURIComponent(file.name)}`
+    ? `${staticBaseUrl}/uploads/${encodeURIComponent(file.name)}`
     : null;
 
-  const downloadUrl = `/api/audio-file?fileName=${encodeURIComponent(file.name)}&download=true`;
+  const downloadUrl = isAudioFile 
+    ? `${apiBaseUrl}/audio/download/${encodeURIComponent(file.name)}`
+    : `${apiBaseUrl}/files/download/${encodeURIComponent(file.name)}`;
 
   // Auto-pause other players when this one starts
   useEffect(() => {
@@ -42,25 +55,83 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
     }
   }, [activePlayerId, isPlaying]);
 
+  // Initialize audio element
+  useEffect(() => {
+    if (!audioRef.current && isAudioFile && audioUrl) {
+      const audio = new Audio();
+      audio.preload = "metadata";
+      audio.src = audioUrl;
+      audioRef.current = audio;
+      
+      // Set up event listeners
+      audio.addEventListener('timeupdate', handleTimeUpdate);
+      audio.addEventListener('ended', handleAudioEnded);
+      audio.addEventListener('error', handleAudioError);
+      audio.addEventListener('loadeddata', handleAudioLoaded);
+      audio.addEventListener('canplay', handleAudioLoaded);
+      audio.addEventListener('durationchange', () => {
+        if (audio.duration && audio.duration !== Infinity) {
+          setAudioDuration(audio.duration);
+        }
+      });
+    }
+
+    return () => {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        audioRef.current = null;
+      }
+    };
+  }, [isAudioFile, audioUrl]);
+
   // Handle play/pause
-  const togglePlay = () => {
-    if (!audioRef.current || !isAudioFile || audioError) {
+  const togglePlay = async () => {
+    if (!isAudioFile || audioError) {
       toast.error("Cannot play this file. It may not be an audio file or is corrupted.");
       return;
     }
 
+    if (!audioRef.current) {
+      // Create audio element if it doesn't exist
+      const audio = new Audio(audioUrl);
+      audio.preload = "auto";
+      audioRef.current = audio;
+      
+      // Set up event listeners
+      audio.addEventListener('timeupdate', handleTimeUpdate);
+      audio.addEventListener('ended', handleAudioEnded);
+      audio.addEventListener('error', handleAudioError);
+      audio.addEventListener('loadeddata', handleAudioLoaded);
+      audio.addEventListener('canplay', handleAudioLoaded);
+      audio.addEventListener('durationchange', () => {
+        if (audio.duration && audio.duration !== Infinity) {
+          setAudioDuration(audio.duration);
+        }
+      });
+      
+      // Set initial volume and playback rate
+      audio.volume = volume / 100;
+      audio.playbackRate = playbackRate;
+    }
+
     if (isPlaying) {
       audioRef.current.pause();
+      setIsPlaying(false);
     } else {
-      audioRef.current.play().catch(error => {
+      setIsLoading(true);
+      try {
+        await audioRef.current.play();
+        setIsPlaying(true);
+        setActivePlayerId(playerId.current);
+      } catch (error) {
         console.error("Playback error:", error);
-        toast.error("Failed to play audio. The file may be corrupted or unsupported.");
+        toast.error("Failed to play audio. The file may be corrupted, unsupported, or there may be a network issue.");
         setIsPlaying(false);
         setAudioError(true);
-      });
-      setActivePlayerId(playerId.current);
+      } finally {
+        setIsLoading(false);
+      }
     }
-    setIsPlaying(!isPlaying);
   };
 
   // Handle audio time updates
@@ -82,25 +153,26 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
     console.error("Audio error:", e);
     setAudioError(true);
     setIsPlaying(false);
+    setIsLoading(false);
     
     // Check specific error
     const audio = audioRef.current;
     if (audio) {
-      switch(audio.error.code) {
-        case audio.error.MEDIA_ERR_ABORTED:
+      switch(audio.error?.code) {
+        case audio.error?.MEDIA_ERR_ABORTED:
           toast.error("Playback was aborted");
           break;
-        case audio.error.MEDIA_ERR_NETWORK:
+        case audio.error?.MEDIA_ERR_NETWORK:
           toast.error("Network error loading audio file");
           break;
-        case audio.error.MEDIA_ERR_DECODE:
+        case audio.error?.MEDIA_ERR_DECODE:
           toast.error("Audio file is corrupted or unsupported format");
           break;
-        case audio.error.MEDIA_ERR_SRC_NOT_SUPPORTED:
+        case audio.error?.MEDIA_ERR_SRC_NOT_SUPPORTED:
           toast.error("Audio format not supported by your browser");
           break;
         default:
-          toast.error("Cannot play audio file");
+          toast.error("Cannot play audio file. Please try downloading it instead.");
       }
     }
   };
@@ -108,7 +180,9 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
   // Handle audio loaded
   const handleAudioLoaded = () => {
     setAudioError(false);
-    console.log("Audio loaded successfully:", file.name);
+    if (audioRef.current) {
+      setAudioDuration(audioRef.current.duration || 0);
+    }
   };
 
   // Handle volume change
@@ -136,23 +210,20 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
     const progressBar = progressBarRef.current;
     const rect = progressBar.getBoundingClientRect();
     const clickPosition = e.clientX - rect.left;
-    const percentage = (clickPosition / rect.width) * 100;
+    const percentage = Math.min(Math.max((clickPosition / rect.width) * 100, 0), 100);
     
     // Calculate new time
-    const newTime = (audioRef.current.duration * percentage) / 100;
+    const newTime = (audioDuration * percentage) / 100;
     
     // Set the audio time
-    audioRef.current.currentTime = newTime;
+    if (audioRef.current) {
+      audioRef.current.currentTime = newTime;
+    }
     setAudioProgress(percentage);
     
     // If audio was paused, start playing
-    if (!isPlaying) {
-      audioRef.current.play().catch(error => {
-        console.error("Playback error after seek:", error);
-        toast.error("Cannot play audio from this position");
-      });
-      setIsPlaying(true);
-      setActivePlayerId(playerId.current);
+    if (!isPlaying && !audioError) {
+      togglePlay();
     }
   };
 
@@ -179,15 +250,14 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
 
   // Format time display
   const formatTime = (seconds) => {
-    if (!seconds || isNaN(seconds)) return "00:00";
+    if (!seconds || isNaN(seconds) || seconds === Infinity) return "00:00";
     const mins = Math.floor(seconds / 60);
     const secs = Math.floor(seconds % 60);
     return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
   };
 
-  // Get current time and duration
-  const currentTime = audioRef.current?.currentTime || 0;
-  const duration = audioRef.current?.duration || 0;
+  // Get current time
+  const currentTime = (audioDuration * audioProgress) / 100;
 
   // Generate waveform bars (simulated for now)
   const waveformBars = Array.from({ length: 40 }, (_, i) => ({
@@ -195,23 +265,126 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
     isActive: i < Math.floor(audioProgress / 2.5)
   }));
 
+  // Handle delete file
+  const handleDelete = async () => {
+    toast.custom(
+      (t) => (
+        <div className="bg-white p-6 rounded-xl shadow-2xl border border-blue-100 w-80">
+          <div className="flex items-center gap-3 mb-4">
+            <div className="p-2 bg-red-100 rounded-lg">
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-6 w-6 text-red-600"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
+                />
+              </svg>
+            </div>
+            <h3 className="font-bold text-lg text-blue-800">
+              Delete File?
+            </h3>
+          </div>
+          <p className="text-gray-700 mb-6">
+            Are you sure you want to delete{" "}
+            <span className="font-semibold">
+              "{file.name}"
+            </span>
+            ? This action cannot be undone.
+          </p>
+          <div className="flex justify-end gap-3">
+            <button
+              onClick={() => toast.dismiss(t)}
+              className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+            >
+              Cancel
+            </button>
+            <button
+              onClick={async () => {
+                try {
+                  const response = await fetch(
+                    `${apiBaseUrl}/files/${encodeURIComponent(file.name)}`,
+                    {
+                      method: "DELETE",
+                      headers: {
+                        "Content-Type": "application/json",
+                      },
+                    }
+                  );
+
+                  const data = await response.json();
+                  
+                  if (response.ok) {
+                    toast.success(
+                      `"${file.name}" deleted successfully.`
+                    );
+                    fetchFiles();
+                  } else {
+                    throw new Error(data.error || "Delete failed");
+                  }
+                } catch (error) {
+                  console.error("Delete error:", error);
+                  toast.error(
+                    `Could not delete "${file.name}". Please try again.`
+                  );
+                } finally {
+                  toast.dismiss(t);
+                }
+              }}
+              className="px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-lg hover:from-red-600 hover:to-red-700 transition-all shadow-md"
+            >
+              Delete
+            </button>
+          </div>
+        </div>
+      ),
+      { duration: Infinity }
+    );
+  };
+
+  // Handle download
+  const handleDownload = () => {
+    // Open download in new tab
+    window.open(downloadUrl, '_blank');
+    
+    // Or use fetch for more control
+    /*
+    fetch(downloadUrl)
+      .then(response => response.blob())
+      .then(blob => {
+        const url = window.URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = file.name;
+        document.body.appendChild(a);
+        a.click();
+        window.URL.revokeObjectURL(url);
+        document.body.removeChild(a);
+      })
+      .catch(error => {
+        console.error('Download error:', error);
+        toast.error('Failed to download file');
+      });
+    */
+  };
+
+  // Handle view transcription
+  const handleViewTranscription = () => {
+    setModal({
+      open: true,
+      fileName: file.name,
+      transcription: file.transcription || 'No transcription available',
+    });
+  };
+
   return (
     <>
-      {/* Hidden audio element - Only render if it's an audio file */}
-      {isAudioFile && (
-        <audio
-          ref={audioRef}
-          src={audioUrl}
-          onTimeUpdate={handleTimeUpdate}
-          onEnded={handleAudioEnded}
-          onError={handleAudioError}
-          onLoadedData={handleAudioLoaded}
-          onCanPlay={handleAudioLoaded}
-          preload="metadata"
-          className="hidden"
-        />
-      )}
-
       <div className="bg-white rounded-xl shadow-md border border-blue-100 p-5 hover:shadow-lg transition-all duration-300 hover:-translate-y-1">
         <div className="flex items-start justify-between mb-4">
           <div className={`p-3 rounded-lg ${isAudioFile ? 'bg-blue-100' : 'bg-gray-100'}`}>
@@ -239,9 +412,14 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
               )}
             </svg>
           </div>
-          <span className={`text-xs px-2 py-1 rounded-full ${isAudioFile ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
-            {isAudioFile ? 'Audio File' : 'Text File'}
-          </span>
+          <div className="flex flex-col items-end gap-1">
+            <span className={`text-xs px-2 py-1 rounded-full ${isAudioFile ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-700'}`}>
+              {isAudioFile ? 'Audio File' : 'Text File'}
+            </span>
+            <span className="text-xs text-gray-500">
+              {file.formattedSize || formatFileSize(file.size)}
+            </span>
+          </div>
         </div>
 
         <h3 className="font-semibold text-blue-800 truncate mb-3">
@@ -256,6 +434,18 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
               </svg>
               <span className="text-sm">Cannot play this audio file</span>
+            </div>
+          </div>
+        )}
+
+        {isLoading && (
+          <div className="mb-4 p-3 bg-blue-50 border border-blue-200 rounded-lg">
+            <div className="flex items-center gap-2 text-blue-700">
+              <svg className="animate-spin h-5 w-5" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+              </svg>
+              <span className="text-sm">Loading audio...</span>
             </div>
           </div>
         )}
@@ -293,16 +483,16 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
               >
                 {/* Progress Bar Container */}
                 <div className={`h-1.5 rounded-full overflow-hidden cursor-pointer relative ${
-                  audioError ? 'bg-gray-200' : 'bg-blue-200'
+                  audioError || isLoading ? 'bg-gray-200' : 'bg-blue-200'
                 }`}>
                   {/* Progress Fill */}
                   <div 
                     className="h-full bg-gradient-to-r from-blue-500 to-blue-600 rounded-full transition-all duration-300"
-                    style={{ width: `${audioError ? 0 : audioProgress}%` }}
+                    style={{ width: `${audioError || isLoading ? 0 : audioProgress}%` }}
                   />
                   
                   {/* Progress Thumb */}
-                  {!audioError && (
+                  {!audioError && !isLoading && (
                     <div 
                       className="absolute top-1/2 -translate-y-1/2 w-3 h-3 bg-white border-2 border-blue-600 rounded-full shadow-md opacity-0 group-hover:opacity-100 transition-opacity"
                       style={{ left: `${audioProgress}%`, marginLeft: '-6px' }}
@@ -311,14 +501,14 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
                 </div>
                 
                 {/* Hover Preview Tooltip */}
-                {!audioError && (
+                {!audioError && !isLoading && (
                   <div className="absolute top-full mt-2 left-1/2 -translate-x-1/2 bg-blue-800 text-white text-xs py-1 px-2 rounded opacity-0 group-hover:opacity-100 transition-opacity pointer-events-none whitespace-nowrap">
                     Click to seek
                   </div>
                 )}
               </div>
               <span className="text-xs text-blue-600 font-medium">
-                {formatTime(duration)}
+                {formatTime(audioDuration)}
               </span>
             </div>
 
@@ -328,9 +518,9 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
               <div className="relative">
                 <button
                   onClick={() => setShowSpeedMenu(!showSpeedMenu)}
-                  disabled={audioError}
+                  disabled={audioError || isLoading}
                   className={`px-3 py-1.5 rounded-lg flex items-center gap-1 text-sm transition-colors duration-200 ${
-                    audioError 
+                    audioError || isLoading
                       ? 'bg-gray-100 text-gray-400 cursor-not-allowed' 
                       : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
                   }`}
@@ -341,7 +531,7 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
                   {playbackRate}x
                 </button>
                 
-                {showSpeedMenu && !audioError && (
+                {showSpeedMenu && !audioError && !isLoading && (
                   <div className="absolute bottom-full mb-2 left-0 bg-white rounded-lg shadow-lg border border-blue-100 z-10 min-w-24">
                     {[0.5, 0.75, 1, 1.25, 1.5, 2].map((rate) => (
                       <button
@@ -361,16 +551,23 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
               {/* Play/Pause Button */}
               <button
                 onClick={togglePlay}
-                disabled={audioError}
+                disabled={audioError || isLoading}
                 className={`p-3 rounded-full transition-all duration-200 shadow-md flex items-center justify-center ${
-                  audioError
+                  isLoading
+                    ? 'bg-gray-400 text-white cursor-wait'
+                    : audioError
                     ? 'bg-gray-300 text-gray-500 cursor-not-allowed'
                     : isPlaying
-                      ? 'bg-gradient-to-r from-red-500 to-red-600 text-white hover:from-red-600 hover:to-red-700'
-                      : 'bg-gradient-to-r from-blue-500 to-blue-600 text-white hover:from-blue-600 hover:to-blue-700'
+                    ? 'bg-gradient-to-r from-red-500 to-red-600 text-white hover:from-red-600 hover:to-red-700'
+                    : 'bg-gradient-to-r from-blue-500 to-blue-600 text-white hover:from-blue-600 hover:to-blue-700'
                 }`}
               >
-                {isPlaying ? (
+                {isLoading ? (
+                  <svg className="animate-spin h-6 w-6" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                ) : isPlaying ? (
                   <svg xmlns="http://www.w3.org/2000/svg" className="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M10 9v6m4-6v6m7-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                   </svg>
@@ -388,9 +585,9 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
                   onClick={() => setShowVolumeSlider(!showVolumeSlider)}
                   onMouseEnter={() => setShowVolumeSlider(true)}
                   onMouseLeave={() => setShowVolumeSlider(false)}
-                  disabled={audioError}
+                  disabled={audioError || isLoading}
                   className={`px-3 py-1.5 rounded-lg flex items-center gap-1 text-sm transition-colors duration-200 ${
-                    audioError 
+                    audioError || isLoading
                       ? 'bg-gray-100 text-gray-400 cursor-not-allowed' 
                       : 'bg-blue-100 text-blue-700 hover:bg-blue-200'
                   }`}
@@ -407,7 +604,7 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
                   {volume}%
                 </button>
                 
-                {showVolumeSlider && !audioError && (
+                {showVolumeSlider && !audioError && !isLoading && (
                   <div 
                     className="absolute bottom-full mb-2 right-0 bg-white rounded-lg shadow-lg border border-blue-100 z-10 p-4 w-48"
                     onMouseEnter={() => setShowVolumeSlider(true)}
@@ -453,141 +650,58 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
 
         {file.transcription && (
           <p className="text-gray-700 text-sm mb-4 line-clamp-3">
-            {file.transcription}
+            {typeof file.transcription === 'string' 
+              ? file.transcription 
+              : file.transcription?.text || 'Transcription available'}
           </p>
         )}
 
         <div className="flex gap-2 mt-4">
           {/* Download Button */}
-          <a
-            href={downloadUrl}
-            download={file.name}
-            className="px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 transition-all duration-200 flex items-center justify-center gap-2"
+          <button
+            onClick={handleDownload}
+            className="flex-1 px-4 py-2 bg-gradient-to-r from-green-500 to-green-600 text-white rounded-lg hover:from-green-600 hover:to-green-700 transition-all duration-200 flex items-center justify-center gap-2"
           >
             <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
             </svg>
             Download
-          </a>
+          </button>
 
           {/* View Button */}
-          <button
-            onClick={() =>
-              setModal({
-                open: true,
-                fileName: file.name,
-                transcription: file.transcription,
-              })
-            }
-            className="flex-1 px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-lg hover:from-blue-600 hover:to-blue-700 transition-all duration-200 flex items-center justify-center gap-2"
-          >
-            <svg
-              xmlns="http://www.w3.org/2000/svg"
-              className="h-4 w-4"
-              fill="none"
-              viewBox="0 0 24 24"
-              stroke="currentColor"
+          {file.transcription && (
+            <button
+              onClick={handleViewTranscription}
+              className="flex-1 px-4 py-2 bg-gradient-to-r from-blue-500 to-blue-600 text-white rounded-lg hover:from-blue-600 hover:to-blue-700 transition-all duration-200 flex items-center justify-center gap-2"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
-              />
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                strokeWidth={2}
-                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
-              />
-            </svg>
-            View
-          </button>
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                className="h-4 w-4"
+                fill="none"
+                viewBox="0 0 24 24"
+                stroke="currentColor"
+              >
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"
+                />
+                <path
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  strokeWidth={2}
+                  d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"
+                />
+              </svg>
+              View
+            </button>
+          )}
           
           {/* Delete Button */}
           <button
-            onClick={async () => {
-              toast.custom(
-                (t) => (
-                  <div className="bg-white p-6 rounded-xl shadow-2xl border border-blue-100 w-80">
-                    <div className="flex items-center gap-3 mb-4">
-                      <div className="p-2 bg-red-100 rounded-lg">
-                        <svg
-                          xmlns="http://www.w3.org/2000/svg"
-                          className="h-6 w-6 text-red-600"
-                          fill="none"
-                          viewBox="0 0 24 24"
-                          stroke="currentColor"
-                        >
-                          <path
-                            strokeLinecap="round"
-                            strokeLinejoin="round"
-                            strokeWidth={2}
-                            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"
-                          />
-                        </svg>
-                      </div>
-                      <h3 className="font-bold text-lg text-blue-800">
-                        Delete File?
-                      </h3>
-                    </div>
-                    <p className="text-gray-700 mb-6">
-                      Are you sure you want to delete{" "}
-                      <span className="font-semibold">
-                        "{file.name}"
-                      </span>
-                      ? This action cannot be undone.
-                    </p>
-                    <div className="flex justify-end gap-3">
-                      <button
-                        onClick={() => toast.dismiss(t)}
-                        className="px-4 py-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
-                      >
-                        Cancel
-                      </button>
-                      <button
-                        onClick={async () => {
-                          try {
-                            const response = await fetch(
-                              "/api/delete-file",
-                              {
-                                method: "POST",
-                                body: JSON.stringify({
-                                  fileName: file.name,
-                                }),
-                                headers: {
-                                  "Content-Type": "application/json",
-                                },
-                              }
-                            );
-
-                            if (response.ok) {
-                              toast.success(
-                                `"${file.name}" deleted successfully.`
-                              );
-                              fetchFiles();
-                            } else {
-                              throw new Error("Delete failed");
-                            }
-                          } catch (error) {
-                            toast.error(
-                              `Could not delete "${file.name}". Please try again.`
-                            );
-                          } finally {
-                            toast.dismiss(t);
-                          }
-                        }}
-                        className="px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-lg hover:from-red-600 hover:to-red-700 transition-all shadow-md"
-                      >
-                        Delete
-                      </button>
-                    </div>
-                  </div>
-                ),
-                { duration: Infinity }
-              );
-            }}
-            className="px-4 py-2 bg-gradient-to-r from-red-100 to-red-200 text-red-700 rounded-lg hover:from-red-200 hover:to-red-300 transition-all duration-200 flex items-center gap-2"
+            onClick={handleDelete}
+            className="px-4 py-2 bg-gradient-to-r from-red-500 to-red-600 text-white rounded-lg hover:from-red-600 hover:to-red-700 transition-all duration-200 flex items-center justify-center gap-2"
           >
             <svg
               xmlns="http://www.w3.org/2000/svg"
@@ -608,4 +722,13 @@ export default function AudioFileCard({ file, setModal, fetchFiles, activePlayer
       </div>
     </>
   );
+}
+
+// Helper function to format file size
+function formatFileSize(bytes) {
+  if (bytes === 0) return '0 Bytes';
+  const k = 1024;
+  const sizes = ['Bytes', 'KB', 'MB', 'GB'];
+  const i = Math.floor(Math.log(bytes) / Math.log(k));
+  return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
 }

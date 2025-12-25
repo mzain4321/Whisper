@@ -4,6 +4,7 @@ import Navbar from "../components/navbar";
 import TranscriptionModal from "../components/TranscriptionModal";
 import AudioFileCard from "../components/AudioFileCard";
 import { toast } from "sonner";
+import { apiFetch, apiUpload } from "../lib/api"; // Import the new API utilities
 
 export default function Page() {
   const [activeTab, setActiveTab] = useState("upload");
@@ -46,10 +47,20 @@ export default function Page() {
   // Active player state
   const [activePlayerId, setActivePlayerId] = useState(null);
 
+  // API Base URL for direct use (if needed)
+  const API_BASE_URL = process.env.NEXT_PUBLIC_RAILWAY_URL || 
+                       process.env.NEXT_PUBLIC_API_URL || 
+                       'http://localhost:5000/api';
+
   const fetchFiles = async () => {
-    const res = await fetch("/api/list-files");
-    const data = await res.json();
-    setFilesList(data);
+    try {
+      const data = await apiFetch('/files');
+      setFilesList(data.files || []);
+    } catch (error) {
+      console.error('Error fetching files:', error);
+      toast.error('Failed to load files');
+      setFilesList([]);
+    }
   };
 
   useEffect(() => {
@@ -210,19 +221,14 @@ export default function Page() {
     setIsAnswering(true);
     
     try {
-      // Call Q&A API
-      const response = await fetch("/api/qa", {
+      // Call Q&A API with Railway backend
+      const data = await apiFetch('/qa/ask', {
         method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-        },
         body: JSON.stringify({
           question: question,
           context: liveTranscription.replace('[Interim:]', '').trim()
         }),
       });
-      
-      const data = await response.json();
       
       if (data.answer) {
         // Add AI answer to chat
@@ -306,34 +312,46 @@ export default function Page() {
 
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("language", "en");
 
-    const res = await fetch("/api/transcribe", {
-      method: "POST",
-      body: formData,
-    });
-    const data = await res.json();
-
-    if (data.transcription) setTempTranscription(data.transcription);
-    else alert("Error transcribing file");
-
-    setLoading(false);
+    try {
+      // Use the apiUpload utility for file uploads
+      const data = await apiUpload('/transcribe', formData);
+      
+      if (data.transcription) {
+        setTempTranscription(data.transcription);
+        toast.success("Transcription complete!");
+      } else {
+        toast.error("Error transcribing file");
+      }
+    } catch (error) {
+      console.error('Transcription error:', error);
+      toast.error("Failed to transcribe audio");
+    } finally {
+      setLoading(false);
+    }
   };
 
   const handleSave = async () => {
     if (!file) return;
     setSaving(true);
 
-    const formData = new FormData();
-    formData.append("file", file);
-    formData.append("language", "en");
-
-    await fetch("/api/transcribe", { method: "POST", body: formData });
-
-    setTempTranscription("");
-    setFile(null);
-    setSaving(false);
-    fetchFiles();
+    try {
+      const formData = new FormData();
+      formData.append("file", file);
+      
+      // Save transcription
+      await apiUpload('/transcribe', formData);
+      
+      toast.success("Transcription saved!");
+      setTempTranscription("");
+      setFile(null);
+      fetchFiles();
+    } catch (error) {
+      console.error('Save error:', error);
+      toast.error("Failed to save transcription");
+    } finally {
+      setSaving(false);
+    }
   };
 
   const formatTime = (seconds) => {
@@ -367,12 +385,8 @@ export default function Page() {
       // Create audio blob from recorded chunks
       let audioBlob = null;
       if (liveAudioChunks.length > 0) {
-        // Create WAV file instead of WebM for better compatibility
-        audioBlob = await convertToWav(liveAudioChunks);
+        audioBlob = new Blob(liveAudioChunks, { type: 'audio/webm' });
       }
-      
-      // Create text blob
-      const textBlob = new Blob([finalText], { type: 'text/plain' });
       
       // Create form data
       const formData = new FormData();
@@ -383,23 +397,21 @@ export default function Page() {
       
       // Append audio file if available
       if (audioBlob && audioBlob.size > 0) {
-        const audioFile = new File([audioBlob], `${baseFileName}.wav`, { type: 'audio/wav' });
+        const audioFile = new File([audioBlob], `${baseFileName}.webm`, { type: 'audio/webm' });
         formData.append("audio", audioFile);
         formData.append("hasAudio", "true");
+        formData.append("fileExtension", "webm");
+      } else {
+        formData.append("hasAudio", "false");
       }
       
       formData.append("fileName", baseFileName);
       
-      // Save to server
-      const response = await fetch("/api/save-live-transcription", {
-        method: "POST",
-        body: formData,
-      });
+      // Save to Railway backend
+      const data = await apiUpload('/live/save', formData);
       
-      const data = await response.json();
-      
-      if (response.ok) {
-        toast.success("Live transcription saved with audio!");
+      if (data.success) {
+        toast.success("Live transcription saved!");
         setLiveTranscription("");
         setLiveAudioChunks([]);
         fetchFiles();
@@ -407,77 +419,39 @@ export default function Page() {
         throw new Error(data.error || "Save failed");
       }
     } catch (error) {
+      console.error('Save live transcription error:', error);
       toast.error(`Failed to save: ${error.message}`);
     } finally {
       setSaving(false);
     }
   };
 
-  // Helper function to convert audio chunks to WAV format
-  const convertToWav = async (chunks) => {
-    // Combine all chunks
-    const blob = new Blob(chunks, { type: 'audio/webm' });
-    
-    // Convert WebM to WAV using Web Audio API
-    return new Promise((resolve) => {
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      const reader = new FileReader();
-      
-      reader.onload = function(e) {
-        audioContext.decodeAudioData(e.target.result, function(buffer) {
-          // Encode to WAV
-          const wavBlob = encodeWAV(buffer);
-          resolve(wavBlob);
-        });
-      };
-      
-      reader.readAsArrayBuffer(blob);
-    });
+  // Updated AudioFileCard integration for Railway backend
+  const handleFilePlay = (filename) => {
+    // Play audio from Railway backend
+    const audioUrl = `${API_BASE_URL.replace('/api', '')}/uploads/${filename}`;
+    const audio = new Audio(audioUrl);
+    audio.play().catch(e => console.error('Audio play error:', e));
   };
 
-  // WAV encoder function
-  const encodeWAV = (buffer) => {
-    const numChannels = 1;
-    const sampleRate = 16000;
-    const format = 1; // PCM
-    const bitDepth = 16;
-    
-    const bytesPerSample = bitDepth / 8;
-    const blockAlign = numChannels * bytesPerSample;
-    
-    const bufferLength = buffer.length * numChannels * bytesPerSample;
-    const data = new DataView(new ArrayBuffer(44 + bufferLength));
-    
-    // Write WAV header
-    writeString(data, 0, 'RIFF');
-    data.setUint32(4, 36 + bufferLength, true);
-    writeString(data, 8, 'WAVE');
-    writeString(data, 12, 'fmt ');
-    data.setUint32(16, 16, true);
-    data.setUint16(20, format, true);
-    data.setUint16(22, numChannels, true);
-    data.setUint32(24, sampleRate, true);
-    data.setUint32(28, sampleRate * blockAlign, true);
-    data.setUint16(32, blockAlign, true);
-    data.setUint16(34, bitDepth, true);
-    writeString(data, 36, 'data');
-    data.setUint32(40, bufferLength, true);
-    
-    // Write audio data
-    const channelData = buffer.getChannelData(0);
-    const offset = 44;
-    
-    for (let i = 0; i < channelData.length; i++) {
-      const sample = Math.max(-1, Math.min(1, channelData[i]));
-      data.setInt16(offset + i * 2, sample < 0 ? sample * 0x8000 : sample * 0x7FFF, true);
-    }
-    
-    return new Blob([data], { type: 'audio/wav' });
+  const handleFileDownload = (filename) => {
+    // Download from Railway backend
+    window.open(`${API_BASE_URL}/files/download/${filename}`, '_blank');
   };
 
-  const writeString = (view, offset, string) => {
-    for (let i = 0; i < string.length; i++) {
-      view.setUint8(offset + i, string.charCodeAt(i));
+  const handleFileDelete = async (filename) => {
+    if (!confirm(`Delete "${filename}"?`)) return;
+    
+    try {
+      await apiFetch(`/files/${filename}`, {
+        method: 'DELETE',
+      });
+      
+      toast.success("File deleted");
+      fetchFiles();
+    } catch (error) {
+      console.error('Delete error:', error);
+      toast.error("Failed to delete file");
     }
   };
 
@@ -961,7 +935,7 @@ export default function Page() {
                     </svg>
                   </div>
                   <h3 className="font-bold text-lg md:text-xl text-blue-800">
-                    Generated Transcription (English Only)
+                    Generated Transcription
                   </h3>
                 </div>
                 <div className="bg-blue-50 border border-blue-200 rounded-lg p-3 md:p-5 mb-4 md:mb-6 max-h-48 md:max-h-64 overflow-y-auto">
@@ -1090,14 +1064,18 @@ export default function Page() {
               </div>
             ) : (
               <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 md:gap-6">
-                {filesList.map((f) => (
+                {filesList.map((file) => (
                   <AudioFileCard
-                    key={f.name}
-                    file={f}
+                    key={file.id || file.name}
+                    file={file}
                     setModal={setModal}
                     fetchFiles={fetchFiles}
                     activePlayerId={activePlayerId}
                     setActivePlayerId={setActivePlayerId}
+                    onPlay={handleFilePlay}
+                    onDownload={handleFileDownload}
+                    onDelete={handleFileDelete}
+                    apiBaseUrl={API_BASE_URL.replace('/api', '')}
                   />
                 ))}
               </div>
@@ -1136,14 +1114,12 @@ export default function Page() {
           overflow: hidden;
         }
         
-        /* Custom responsive breakpoints */
         @media (min-width: 480px) {
           .xs\:inline {
             display: inline;
           }
         }
         
-        /* Ensure modal is responsive on mobile */
         @media (max-width: 640px) {
           .fixed.inset-0 {
             padding: 1rem;
